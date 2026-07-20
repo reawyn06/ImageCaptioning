@@ -1,5 +1,5 @@
 """
-evaluate.py
+evaluate.py  (ĐÃ VÁ LỖI — xem khối "FIX #1" và "FIX #2" trong file)
 ======================
 Mục đích:
     Đánh giá 4 checkpoint (1 cho mỗi fusion strategy) trên tập validation,
@@ -14,12 +14,38 @@ Cách chạy:
     python evaluate.py                     # đánh giá cả 4 strategy
     python evaluate.py --strategy concat   # chỉ đánh giá 1 strategy
 
-Lưu ý quan trọng:
+===========================================================================
+GHI CHÚ VỀ 2 LỖI ĐÃ SỬA (SO VỚI BẢN GỐC) -- LÝ DO BLEU/CIDEr THẤP HƠN KỲ VỌNG
+===========================================================================
+
+FIX #1 -- THIẾU BƯỚC PTBTokenizer (nguyên nhân chính khiến điểm thấp):
+    Toàn bộ pipeline chuẩn của pycocoevalcap (repo gốc salesforce/coco-caption
+    -- nơi MỌI paper báo cáo BLEU/CIDEr/SPICE đều dùng) YÊU CẦU chạy qua
+    Stanford PTBTokenizer TRƯỚC khi đưa gts/res vào Bleu()/Cider()/Spice().
+    Bản gốc của file này bỏ qua bước này, đưa thẳng text thô (còn nguyên dấu
+    câu, hoa/thường không chuẩn hóa) vào scorer -- các scorer này chỉ tách
+    từ bằng khoảng trắng (.split()), nên "bike." và "bike" bị tính là 2 token
+    KHÁC NHAU, làm giảm precision n-gram một cách HỆ THỐNG trên mọi ảnh, mọi
+    metric. Đây gần như chắc chắn là lý do BLEU-4/CIDEr thấp hơn nhiều so với
+    literature (Bottom-Up Top-Down: BLEU-4 ~36, CIDEr ~113).
+
+FIX #2 -- Đồng bộ tham số decoding với evaluate_flickr30k.py:
+    Bản gốc gọi model.decoder.generate(fused_features, fused_mask,
+    max_length=MAX_GEN_LENGTH) KHÔNG truyền repetition_penalty/
+    no_repeat_ngram_size -- nghĩa là dùng giá trị MẶC ĐỊNH của hàm generate()
+    (repetition_penalty=1.3, no_repeat_ngram_size=3), tức là bảng kết quả
+    COCO chính thức (Mục 3.2 báo cáo) KHÔNG PHẢI greedy thuần túy, trong khi
+    evaluate_flickr30k.py đã cẩn thận tắt hẳn 2 tham số này để đảm bảo "kiểm
+    soát biến số". Bản vá này đồng bộ evaluate.py dùng đúng greedy thuần túy
+    (giống Flickr30k) để 2 bảng kết quả có thể so sánh công bằng với nhau.
+
+Lưu ý khác giữ nguyên từ bản gốc:
     - LẦN ĐẦU chạy, pycocoevalcap (phần SPICE) sẽ tự tải Stanford CoreNLP
       (~380MB) từ internet -- cần thời gian, chỉ tải 1 lần, lưu cache.
+    - PTBTokenizer cũng cần Java -- bạn đã có sẵn Java cho METEOR/SPICE nên
+      KHÔNG phát sinh thêm dependency mới.
     - Việc đánh giá dùng GROUND TRUTH là TOÀN BỘ 5 caption/ảnh (không phải
-      random 1/5 như lúc train) -- đây là cách đánh giá CHUẨN của COCO,
-      caption sinh ra được so với ĐẦY ĐỦ các caption tham chiếu để công bằng.
+      random 1/5 như lúc train) -- đây là cách đánh giá CHUẨN của COCO.
 """
 
 import os
@@ -32,6 +58,7 @@ from torch.utils.data import DataLoader
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.spice.spice import Spice
+from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer  # FIX #1: import tokenizer chuẩn
 from meteor_fixed import MeteorFixed  # Dùng bản đã patch lỗi buffering trên Windows
                                         # (xem meteor_fixed.py để biết chi tiết nguyên nhân)
 
@@ -53,8 +80,9 @@ ALL_STRATEGIES = ["baseline", "concat", "one_directional", "bidirectional"]
 @torch.no_grad()
 def generate_captions_for_strategy(strategy: str, device) -> dict:
     """
-    Load checkpoint best của 1 strategy, sinh caption (greedy) cho toàn bộ
-    ảnh trong val2017. Trả về dict {coco_id_str: caption_string}.
+    Load checkpoint best của 1 strategy, sinh caption (greedy THUẦN TÚY --
+    xem FIX #2) cho toàn bộ ảnh trong val2017. Trả về dict
+    {coco_id_str: caption_string}.
     """
     checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{strategy}_best.pt")
     print(f"\n[{strategy}] Đang load checkpoint: {checkpoint_path} ...")
@@ -86,7 +114,14 @@ def generate_captions_for_strategy(strategy: str, device) -> dict:
         semantic_features, semantic_mask = model.rgcn.forward_batch(batch_objects, batch_triples)
         fused_features, fused_mask = model.fusion(visual_features, semantic_features, semantic_mask)
 
-        captions = model.decoder.generate(fused_features, fused_mask, max_length=MAX_GEN_LENGTH)
+        # FIX #2: truyền tường minh repetition_penalty=1.0, no_repeat_ngram_size=0
+        # để khớp ĐÚNG điều kiện greedy thuần túy đã dùng trong evaluate_flickr30k.py
+        # -- đảm bảo 2 bảng kết quả (COCO vs Flickr30k) so sánh công bằng.
+        captions = model.decoder.generate(
+            fused_features, fused_mask, max_length=MAX_GEN_LENGTH,
+            repetition_penalty=1.0,
+            no_repeat_ngram_size=0,
+        )
 
         for coco_id, caption in zip(coco_ids, captions):
             generated[str(coco_id)] = caption
@@ -119,7 +154,7 @@ def load_full_ground_truth() -> dict:
 
 
 # ============================================================
-# BƯỚC 3 — Tính 4 chỉ số đánh giá
+# BƯỚC 3 — Tính 4 chỉ số đánh giá (ĐÃ SỬA: thêm PTBTokenizer -- FIX #1)
 # ============================================================
 def compute_metrics(gts: dict, res: dict) -> dict:
     """
@@ -128,12 +163,26 @@ def compute_metrics(gts: dict, res: dict) -> dict:
          là list (dù chỉ có 1 phần tử), không phải string trực tiếp.
 
     Trả về dict {metric_name: score}.
+
+    FIX #1: Bản gốc đưa gts/res THẲNG vào scorer (text thô, còn dấu câu,
+    hoa/thường lẫn lộn). Điều này khiến n-gram precision bị tính sai vì
+    Bleu()/Cider()/Spice() chỉ tách từ theo khoảng trắng. Cần chạy qua
+    PTBTokenizer trước -- ĐÚNG như coco-caption gốc luôn làm -- để chuẩn hóa
+    dấu câu/hoa-thường trước khi so khớp n-gram.
     """
+    print("  Đang chuẩn hóa caption qua PTBTokenizer (FIX quan trọng) ...")
+    tokenizer = PTBTokenizer()
+    # PTBTokenizer yêu cầu format {id: [{"caption": text}, ...]}
+    gts_formatted = {k: [{"caption": c} for c in v] for k, v in gts.items()}
+    res_formatted = {k: [{"caption": c} for c in v] for k, v in res.items()}
+    gts_tokenized = tokenizer.tokenize(gts_formatted)
+    res_tokenized = tokenizer.tokenize(res_formatted)
+
     metrics = {}
 
     print("  Đang tính BLEU ...")
     bleu_scorer = Bleu(4)
-    bleu_scores, _ = bleu_scorer.compute_score(gts, res)
+    bleu_scores, _ = bleu_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["BLEU-1"] = bleu_scores[0]
     metrics["BLEU-2"] = bleu_scores[1]
     metrics["BLEU-3"] = bleu_scores[2]
@@ -141,17 +190,17 @@ def compute_metrics(gts: dict, res: dict) -> dict:
 
     print("  Đang tính METEOR (cần Java, dùng bản đã patch lỗi buffering Windows) ...")
     meteor_scorer = MeteorFixed()
-    meteor_score, _ = meteor_scorer.compute_score(gts, res)
+    meteor_score, _ = meteor_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["METEOR"] = meteor_score
 
     print("  Đang tính CIDEr ...")
     cider_scorer = Cider()
-    cider_score, _ = cider_scorer.compute_score(gts, res)
+    cider_score, _ = cider_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["CIDEr"] = cider_score
 
     print("  Đang tính SPICE (cần Java, lần đầu sẽ tải Stanford CoreNLP ~380MB) ...")
     spice_scorer = Spice()
-    spice_score, _ = spice_scorer.compute_score(gts, res)
+    spice_score, _ = spice_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["SPICE"] = spice_score
 
     return metrics
@@ -202,14 +251,14 @@ def main():
         metrics = compute_metrics(gts, res)
         all_results[strategy] = metrics
 
-        print(f"\n[{strategy}] KẾT QUẢ:")
+        print(f"\n[{strategy}] KẾT QUẢ (ĐÃ SỬA LỖI TOKENIZE + DECODING):")
         for k, v in metrics.items():
             print(f"  {k}: {v:.4f}")
 
     # ----- Bảng tổng hợp so sánh cả 4 strategy -----
     if len(all_results) > 1:
         print("\n" + "=" * 80)
-        print("BẢNG SO SÁNH TỔNG HỢP")
+        print("BẢNG SO SÁNH TỔNG HỢP (SAU KHI SỬA LỖI)")
         print("=" * 80)
         metric_names = list(next(iter(all_results.values())).keys())
         header = f"{'Strategy':<18}" + "".join(f"{m:>10}" for m in metric_names)
@@ -219,10 +268,12 @@ def main():
             print(row)
 
     # ----- Lưu kết quả tổng hợp ra JSON -----
-    results_path = os.path.join(RESULTS_DIR, "evaluation_results.json")
+    results_path = os.path.join(RESULTS_DIR, "evaluation_results_fixed.json")
     with open(results_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
     print(f"\nĐã lưu kết quả tổng hợp tại: {results_path}")
+    print("\n⚠️  LƯU Ý: file lưu là 'evaluation_results_fixed.json' (KHÔNG ghi đè")
+    print("   'evaluation_results.json' cũ) để bạn có thể đối chiếu trước/sau khi sửa lỗi.")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 """
-evaluate_flickr30k.py
+evaluate_flickr30k.py  (ĐÃ VÁ LỖI — xem khối "FIX" trong file)
 ======================
 Mục đích:
     Đánh giá khả năng tổng quát hóa (generalization) của 4 checkpoint
@@ -16,8 +16,23 @@ Mục đích:
 
 Cách chạy:
     python evaluate_flickr30k.py                     # Đánh giá cả 4 strategy với DETR mặc định
-    python evaluate_flickr30k.py --semantic-dir features/flickr30k/semantic_yoloworld --tag yoloworld  # Chạy pipeline YOLO-World mới
+    python evaluate_flickr30k.py --semantic-dir features/flickr30k/semantic_yoloworld --tag yoloworld
     python evaluate_flickr30k.py --strategy baseline  # Chỉ test 1 strategy
+
+===========================================================================
+GHI CHÚ VỀ LỖI ĐÃ SỬA (so với bản gốc)
+===========================================================================
+FIX -- THIẾU BƯỚC PTBTokenizer (cùng lỗi đã tìm thấy trong evaluate.py):
+    Bản gốc đưa gts/res dạng text thô (chưa qua Stanford PTBTokenizer) thẳng
+    vào Bleu()/Cider()/Spice(). Điều này làm giảm precision n-gram một cách
+    hệ thống (dấu câu dính vào từ cuối không khớp reference đã tokenize).
+    Đây là 1 trong 2 lý do khiến điểm BLEU/CIDEr thấp hơn kỳ vọng literature.
+    Bản vá này thêm bước tokenize CHUẨN giống coco-caption gốc.
+
+    LƯU Ý: decoding params (repetition_penalty=1.0, no_repeat_ngram_size=0)
+    trong hàm generate_captions() của bản gốc ĐÃ ĐÚNG SẴN (bạn đã tự làm tốt
+    phần này để đảm bảo "kiểm soát biến số" khi so DETR vs YOLO-World) --
+    KHÔNG cần sửa gì thêm ở phần đó, chỉ evaluate.py (COCO) là thiếu đồng bộ.
 """
 
 import os
@@ -36,6 +51,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.spice.spice import Spice
+from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer  # FIX: import tokenizer chuẩn
 from meteor_fixed import MeteorFixed
 
 from rgcn_encoder import GloveVocab
@@ -203,6 +219,8 @@ def generate_captions(strategy: str, dataset: Flickr30kDataset,
         fused_features, fused_mask = model.fusion(
             visual_features, semantic_features, semantic_mask
         )
+        # Giữ NGUYÊN như bản gốc -- phần này vốn ĐÃ ĐÚNG (greedy thuần túy,
+        # đã tắt tường minh repetition_penalty/no_repeat_ngram_size từ đầu).
         captions = model.decoder.generate(
             fused_features, fused_mask, max_length=MAX_GEN_LENGTH,
             repetition_penalty=1.0,
@@ -220,14 +238,26 @@ def generate_captions(strategy: str, dataset: Flickr30kDataset,
 
 
 # ============================================================
-# BƯỚC 4 — Tính metrics
+# BƯỚC 4 — Tính metrics (ĐÃ SỬA: thêm PTBTokenizer)
 # ============================================================
 def compute_metrics(gts: dict, res: dict) -> dict:
+    """
+    FIX: thêm bước PTBTokenizer trước khi tính BLEU/METEOR/CIDEr/SPICE --
+    cùng lý do đã giải thích trong evaluate.py (chuẩn hóa dấu câu/hoa-thường
+    để n-gram precision được tính đúng, khớp cách coco-caption gốc làm).
+    """
+    print("  Đang chuẩn hóa caption qua PTBTokenizer (FIX quan trọng) ...")
+    tokenizer = PTBTokenizer()
+    gts_formatted = {k: [{"caption": c} for c in v] for k, v in gts.items()}
+    res_formatted = {k: [{"caption": c} for c in v] for k, v in res.items()}
+    gts_tokenized = tokenizer.tokenize(gts_formatted)
+    res_tokenized = tokenizer.tokenize(res_formatted)
+
     metrics = {}
 
     print("  Đang tính BLEU ...")
     bleu_scorer = Bleu(4)
-    bleu_scores, _ = bleu_scorer.compute_score(gts, res)
+    bleu_scores, _ = bleu_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["BLEU-1"] = bleu_scores[0]
     metrics["BLEU-2"] = bleu_scores[1]
     metrics["BLEU-3"] = bleu_scores[2]
@@ -235,17 +265,17 @@ def compute_metrics(gts: dict, res: dict) -> dict:
 
     print("  Đang tính METEOR ...")
     meteor_scorer = MeteorFixed()
-    meteor_score, _ = meteor_scorer.compute_score(gts, res)
+    meteor_score, _ = meteor_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["METEOR"] = meteor_score
 
     print("  Đang tính CIDEr ...")
     cider_scorer = Cider()
-    cider_score, _ = cider_scorer.compute_score(gts, res)
+    cider_score, _ = cider_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["CIDEr"] = cider_score
 
     print("  Đang tính SPICE ...")
     spice_scorer = Spice()
-    spice_score, _ = spice_scorer.compute_score(gts, res)
+    spice_score, _ = spice_scorer.compute_score(gts_tokenized, res_tokenized)
     metrics["SPICE"] = spice_score
 
     return metrics
@@ -272,7 +302,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Kiểm tra đầu vào (sử dụng args.semantic_dir thay vì cấu hình cứng cũ)
     for path, name in [(VISUAL_DIR, "Visual features"), (args.semantic_dir, "Semantic features"),
                        (CAPTIONS_FILE, "captions.txt")]:
         if not os.path.exists(path):
@@ -315,7 +344,7 @@ def main():
         metrics = compute_metrics(gts, res)
         all_results[strategy] = metrics
 
-        print(f"\n[{strategy}] KẾT QUẢ (Flickr30k - Tag: {args.tag}):")
+        print(f"\n[{strategy}] KẾT QUẢ (Flickr30k - Tag: {args.tag}, ĐÃ SỬA LỖI TOKENIZE):")
         for k, v in metrics.items():
             print(f"  {k}: {v:.4f}")
 
@@ -331,13 +360,17 @@ def main():
             row = f"{strategy:<20}" + "".join(f"{metrics[m]:>10.4f}" for m in metric_names)
             print(row)
 
-        # So sánh với kết quả COCO gốc nếu có
-        coco_results_path = os.path.join(RESULTS_DIR, "evaluation_results.json")
+        # So sánh với kết quả COCO gốc nếu có (ƯU TIÊN file đã sửa lỗi nếu tồn tại)
+        coco_results_path_fixed = os.path.join(RESULTS_DIR, "evaluation_results_fixed.json")
+        coco_results_path_old = os.path.join(RESULTS_DIR, "evaluation_results.json")
+        coco_results_path = coco_results_path_fixed if os.path.exists(coco_results_path_fixed) else coco_results_path_old
+
         if os.path.exists(coco_results_path):
             with open(coco_results_path) as f:
                 coco_results = json.load(f)
             print("\n" + "=" * 90)
             print(f"SO SÁNH COCO vs FLICKR30K ({args.tag.upper()}) (BLEU-4 và CIDEr)")
+            print(f"(Đối chiếu với: {coco_results_path})")
             print("=" * 90)
             print(f"{'Strategy':<20} {'BLEU-4 COCO':>12} {'BLEU-4 F30k':>12} "
                   f"{'CIDEr COCO':>11} {'CIDEr F30k':>11}")
@@ -355,7 +388,7 @@ def main():
                       f"  (Δ BLEU-4: {delta_b4:+.4f}, Δ CIDEr: {delta_ci:+.4f})")
 
     # Lưu kết quả tổng hợp với định dạng tên mới
-    out_path = os.path.join(RESULTS_DIR, f"flickr30k_evaluation_results_{args.tag}.json")
+    out_path = os.path.join(RESULTS_DIR, f"flickr30k_evaluation_results_{args.tag}_fixed.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
     print(f"\nĐã lưu kết quả tổng hợp tại: {out_path}")

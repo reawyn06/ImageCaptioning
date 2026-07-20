@@ -1,5 +1,5 @@
 """
-extract_visual_features.py
+extract_visual_features.py  (ĐÃ SỬA — đồng nhất model ViT, xem khối "FIX" bên dưới)
 ============================
 Trích xuất Visual Features từ ảnh COCO bằng ViT-B/16 pretrained (HuggingFace).
 
@@ -13,9 +13,37 @@ Trích xuất Visual Features từ ảnh COCO bằng ViT-B/16 pretrained (Huggin
   => Output mỗi ảnh: tensor shape (196, 768)
      Đây chính là "Visual Feature Vector" trong pipeline của bạn, ở dạng sequence.
 
-Lưu kết quả ra .pt (PyTorch tensor) hoặc .npy để dùng lại, KHÔNG cần chạy ViT
-lại mỗi lần train -> tiết kiệm thời gian training rất nhiều (vì ViT-B/16 không
-cần fine-tune trong đề tài này, ta dùng feature extractor cố định - "frozen").
+Lưu kết quả ra .pt (PyTorch tensor) để dùng lại, KHÔNG cần chạy ViT lại mỗi
+lần train (vì ViT-B/16 không fine-tune trong đề tài này -- "frozen").
+
+===========================================================================
+FIX — ĐỒNG NHẤT MODEL VIT VỚI visual_extractor.py / build_flickr30k_features.py
+===========================================================================
+Bản gốc dùng MODEL_NAME = "google/vit-base-patch16-224-in21k" để trích visual
+feature cho COCO train/val. Trong khi đó visual_extractor.py (dùng cho web
+demo, inference on-the-fly) VÀ build_flickr30k_features.py (dùng cho zero-shot
+Flickr30k) đều dùng "google/vit-base-patch16-224" (KHÔNG có hậu tố -in21k).
+
+Đây là 2 checkpoint pretrained KHÁC NHAU:
+    - "...-in21k": chỉ pretrain trên ImageNet-21k (chưa fine-tune thêm)
+    - "..." (không hậu tố): pretrain trên ImageNet-21k RỒI fine-tune tiếp
+      trên ImageNet-1k cho tác vụ phân loại
+
+Cùng kiến trúc (ViT-B/16, output 196x768) nhưng TRỌNG SỐ khác nhau -> phân
+phối last_hidden_state cũng khác nhau. Hệ quả: model được train trên visual
+feature trích từ 1 backbone, nhưng khi đánh giá zero-shot (Flickr30k) và demo
+lại dùng backbone khác -- 1 nguồn domain-shift "ẩn" chưa từng được kiểm soát.
+
+Bản vá này đổi MODEL_NAME về "google/vit-base-patch16-224" (bỏ hậu tố -in21k)
+để KHỚP với visual_extractor.py và build_flickr30k_features.py -- đảm bảo
+toàn bộ pipeline (train COCO + inference Flickr30k/demo) dùng CHUNG 1 backbone
+ViT-B/16 duy nhất. Vì bạn đang phải build lại visual feature COCO từ đầu (đã
+xóa folder cũ) và train lại decoder từ đầu (đổi sang Transformer decoder),
+đây là thời điểm ít tốn kém nhất để sửa triệt để, không cần chạy lại gì thêm
+ngoài kế hoạch đã có.
+
+KHÔNG CẦN sửa gì ở visual_extractor.py hay build_flickr30k_features.py --
+2 file đó đã dùng đúng model rồi, chỉ file này là lệch.
 
 Chạy: python extract_visual_features.py
 """
@@ -37,7 +65,8 @@ COCO_ANNOTATIONS_DIR = BASE_DIR / "datasets" / "coco" / "annotations"
 # Nơi lưu visual features đã trích xuất (mỗi ảnh 1 file .pt)
 OUTPUT_DIR = BASE_DIR / "features" / "visual"
 
-MODEL_NAME = "google/vit-base-patch16-224-in21k"  # ViT-B/16, 768-dim output
+# FIX: bỏ hậu tố "-in21k" để khớp visual_extractor.py / build_flickr30k_features.py
+MODEL_NAME = "google/vit-base-patch16-224"  # ViT-B/16, 768-dim output
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 8  # giảm từ 32 -> 8 để tránh ngốn RAM hệ thống khi load PIL Image hàng loạt
 
@@ -117,6 +146,7 @@ def main():
     print("TRÍCH XUẤT VISUAL FEATURES (ViT-B/16)")
     print("=" * 60)
     print(f"Device: {DEVICE}")
+    print(f"Model: {MODEL_NAME}  (đã đồng nhất với visual_extractor.py / build_flickr30k_features.py)")
 
     print(f"\nĐang tải pretrained model: {MODEL_NAME} ...")
     processor = ViTImageProcessor.from_pretrained(MODEL_NAME)

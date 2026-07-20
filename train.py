@@ -1,5 +1,6 @@
 """
-train.py
+train.py  (ĐÃ CẬP NHẬT — chuyển từ GPT-2+prefix injection sang Transformer
+Decoder tự huấn luyện, xem khối "THAY ĐỔI QUAN TRỌNG" bên dưới)
 ======================
 Mục đích:
     Training script đầy đủ để chạy 1 trong 4 thực nghiệm fusion strategy.
@@ -19,6 +20,21 @@ Thiết kế đã chốt:
     - Batch size: 8
     - Epoch tối đa: 20, early stopping patience=3 (theo val loss)
     - Checkpoint: lưu best (val loss thấp nhất) + checkpoint cuối cùng
+
+===========================================================================
+THAY ĐỔI QUAN TRỌNG (so với bản gốc dùng GPT-2 + prefix injection)
+===========================================================================
+Theo yêu cầu giáo viên hướng dẫn: thay CaptionDecoder (GPT-2 fine-tune +
+ClipCap-style prefix injection) bằng CaptionDecoderTransformer (Transformer
+Decoder chuẩn Vaswani et al. 2017, huấn luyện TỪ ĐẦU, có cross-attention
+THẬT vào fused_features -- xem transformer_caption_decoder.py để biết chi
+tiết lý do và kiến trúc).
+
+HỆ QUẢ QUAN TRỌNG: checkpoint cũ (*_best.pt, *_last.pt của bản GPT-2) KHÔNG
+CÒN TƯƠNG THÍCH với kiến trúc decoder mới -- bắt buộc phải train lại từ đầu
+cho CẢ 4 STRATEGY. Đảm bảo đã chạy `python build_caption_vocab.py` trước khi
+chạy file này (decoder mới cần features/caption_vocab.pt để khởi tạo vocab
++ embedding riêng, không dùng tokenizer GPT-2 nữa).
 """
 
 import os
@@ -31,7 +47,7 @@ from torch.utils.data import DataLoader
 
 from rgcn_encoder import GloveVocab, RGCNEncoder
 from fusion_module import build_fusion_module
-from caption_decoder import CaptionDecoder
+from transformer_caption_decoder import CaptionDecoderTransformer  # THAY ĐỔI: import decoder mới
 from caption_dataset import CaptionDataset, collate_fn
 
 
@@ -40,6 +56,7 @@ from caption_dataset import CaptionDataset, collate_fn
 # ============================================================
 PROJECT_ROOT = r"C:\Users\ADMIN\Documents\NCKH\ImageCaptioning"
 GLOVE_VOCAB_PATH = os.path.join(PROJECT_ROOT, "features", "glove_vocab.pt")
+CAPTION_VOCAB_PATH = os.path.join(PROJECT_ROOT, "features", "caption_vocab.pt")  # THÊM MỚI: vocab riêng cho decoder
 CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 
 BATCH_SIZE = 8
@@ -59,7 +76,10 @@ class ImageCaptioningModel(nn.Module):
         self.strategy = strategy
         self.rgcn = RGCNEncoder(glove_vocab)
         self.fusion = build_fusion_module(strategy)
-        self.decoder = CaptionDecoder()
+        # THAY ĐỔI: CaptionDecoderTransformer thay cho CaptionDecoder (GPT-2).
+        # Cần truyền CAPTION_VOCAB_PATH vì decoder mới có vocab/embedding
+        # riêng, học từ đầu -- không có pretrained tokenizer như GPT-2.
+        self.decoder = CaptionDecoderTransformer(CAPTION_VOCAB_PATH)
 
     def compute_loss(self, visual_features, batch_objects, batch_triples, caption_texts):
         device = visual_features.device
@@ -73,6 +93,9 @@ class ImageCaptioningModel(nn.Module):
         fused_features, fused_mask = self.fusion(visual_features, semantic_features, semantic_mask)
 
         # ----- Tokenize caption + tính loss -----
+        # encode_captions() ở decoder mới dùng tokenizer word-level riêng
+        # (xem transformer_caption_decoder.py), KHÔNG còn dùng BPE của GPT-2,
+        # nhưng interface gọi hàm giữ NGUYÊN như cũ -- không cần sửa gì thêm.
         caption_ids, caption_mask = self.decoder.encode_captions(caption_texts, max_length=MAX_CAPTION_LENGTH)
         caption_ids = caption_ids.to(device)
         caption_mask = caption_mask.to(device)
@@ -125,8 +148,11 @@ def run_epoch(model, loader, optimizer, device, train: bool):
             if train:
                 optimizer.zero_grad()
                 loss.backward()
-                # Gradient clipping -- quan trọng khi fine-tune GPT-2, tránh
-                # exploding gradient làm hỏng pretrained weight.
+                # Gradient clipping -- vẫn giữ lại dù decoder mới không còn
+                # fine-tune GPT-2 pretrained (rủi ro exploding gradient thấp
+                # hơn trước), nhưng vẫn là thực hành an toàn chuẩn khi train
+                # Transformer từ đầu (đặc biệt ở vài epoch đầu, embedding và
+                # attention weight còn khởi tạo ngẫu nhiên).
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
@@ -147,6 +173,14 @@ def main():
     strategy = args.strategy
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+    # Kiểm tra sớm caption_vocab.pt đã tồn tại chưa -- báo lỗi rõ ràng ngay
+    # từ đầu thay vì để crash giữa chừng lúc khởi tạo model.
+    if not os.path.exists(CAPTION_VOCAB_PATH):
+        raise FileNotFoundError(
+            f"Không tìm thấy {CAPTION_VOCAB_PATH}. "
+            f"Hãy chạy 'python build_caption_vocab.py' trước khi train."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Strategy: {strategy} | Device: {device}")
@@ -171,7 +205,10 @@ def main():
     model = ImageCaptioningModel(strategy, glove_vocab).to(device)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    num_decoder_params = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
     print(f"Tổng số tham số có thể train: {num_params:,}")
+    print(f"  (trong đó decoder: {num_decoder_params:,} -- so với GPT-2 fine-tune toàn bộ "
+          f"trước đây là ~124,000,000)")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     early_stopping = EarlyStopping(EARLY_STOPPING_PATIENCE)
