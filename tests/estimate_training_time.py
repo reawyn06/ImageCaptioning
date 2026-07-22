@@ -1,5 +1,5 @@
 """
-estimate_training_time.py
+estimate_training_time.py  (ĐÃ SỬA — xem khối "FIX" bên dưới)
 ======================
 Mục đích:
     Chạy thử vài batch đầu (KHÔNG chạy hết epoch) để đo thời gian thực tế
@@ -8,12 +8,37 @@ Mục đích:
         - Thời gian cho cả quá trình train 1 strategy (tối đa 20 epoch)
         - Thời gian cho cả 4 strategy
 
-Cách chạy:
-    python estimate_training_time.py --strategy baseline
+Cách chạy (từ thư mục gốc project):
+    python tests\\estimate_training_time.py --strategy baseline
+
+===========================================================================
+FIX — THIẾU sys.path.insert(PROJECT_ROOT)
+===========================================================================
+Bản gốc import trực tiếp `from rgcn_encoder import GloveVocab`, `from
+caption_dataset import ...`, `from train import ...` -- các module này nằm
+ở THƯ MỤC GỐC project, không nằm trong tests/. Khi chạy `python
+tests\\estimate_training_time.py` từ project root, Python chỉ tự thêm thư
+mục CHỨA FILE ĐANG CHẠY (tests/) vào sys.path, KHÔNG tự thêm project root
+-> ModuleNotFoundError: No module named 'rgcn_encoder'.
+
+Đây là lỗi CÓ SẴN từ trước (không liên quan gì đến việc đổi Transformer
+Decoder) -- so sánh evaluate_flickr30k.py và scripts/build_flickr30k_features.py
+đã xử lý đúng việc này bằng sys.path.insert(0, PROJECT_ROOT), file này bị
+thiếu bước tương tự. Bản vá thêm đúng 3 dòng đó ở đầu file, TRƯỚC các câu
+lệnh import module gốc.
 """
 
 import argparse
+import os
+import sys
 import time
+
+# FIX: thêm project root vào sys.path TRƯỚC khi import các module ở thư mục
+# gốc (rgcn_encoder, caption_dataset, train) -- bắt buộc vì file này nằm
+# trong subfolder tests/, không tự "nhìn thấy" các module ở thư mục cha.
+PROJECT_ROOT = r"C:\Users\ADMIN\Documents\NCKH\ImageCaptioning"
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import torch
 from torch.utils.data import DataLoader

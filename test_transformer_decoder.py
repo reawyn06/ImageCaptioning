@@ -20,7 +20,7 @@ import sys
 import torch
 
 PROJECT_ROOT = r"C:\Users\ADMIN\Documents\NCKH\ImageCaptioning"
-CAPTION_VOCAB_PATH = os.path.join(PROJECT_ROOT, "../features", "caption_vocab.pt")
+CAPTION_VOCAB_PATH = os.path.join(PROJECT_ROOT, "features", "caption_vocab.pt")
 
 if not os.path.exists(CAPTION_VOCAB_PATH):
     print(f"❌ Chưa tìm thấy {CAPTION_VOCAB_PATH}")

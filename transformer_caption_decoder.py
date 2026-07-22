@@ -153,6 +153,29 @@ class CaptionDecoderTransformer(nn.Module):
 
         # ----- Token embedding (học từ đầu -- KHÔNG pretrained) -----
         self.token_embedding = nn.Embedding(self.vocab_size, hidden_dim, padding_idx=self.pad_id)
+
+        # FIX (phát hiện qua smoke test -- loss ban đầu ~206 thay vì ~ln(vocab_size)~9.2):
+        # nn.Embedding mặc định init N(0, 1) -- QUÁ LỚN khi weight bị TIE với
+        # output projection (tie_weights=True bên dưới). Vì output_proj DÙNG
+        # TRỰC TIẾP ma trận này (không qua embed_scale, chỉ áp dụng ở input),
+        # std=1 khiến logits có phương sai ~hidden_dim (~768) -> với vocab
+        # 10,297 lớp, giá trị logit lớn nhất do thuần túy ngẫu nhiên có thể
+        # lên tới hàng trăm, làm cross-entropy loss ban đầu vọt lên bất
+        # thường (206-211 thay vì ~9.2 kỳ vọng cho phân phối gần đều).
+        #
+        # Khởi tạo lại với std = 1/sqrt(hidden_dim) -- ĐÚNG CẶP với
+        # embed_scale = sqrt(hidden_dim) dùng ở _embed_tokens(): sau khi
+        # nhân embed_scale, giá trị embedding đưa vào decoder có std ~1
+        # (khớp scale positional encoding), trong khi RAW weight (dùng trực
+        # tiếp cho output_proj do tie) vẫn giữ std nhỏ, giữ logit ban đầu ở
+        # mức hợp lý (~ln(vocab_size), đúng kỳ vọng cho model chưa train).
+        nn.init.normal_(self.token_embedding.weight, mean=0.0, std=hidden_dim ** -0.5)
+        with torch.no_grad():
+            # nn.Embedding mặc định tự zero-init hàng padding_idx, nhưng lệnh
+            # normal_() ở trên ghi đè LÊN TOÀN BỘ weight (kể cả hàng pad) --
+            # cần zero lại hàng pad để giữ đúng hành vi mặc định của PyTorch.
+            self.token_embedding.weight[self.pad_id].zero_()
+
         self.pos_encoding = PositionalEncoding(hidden_dim, max_len=max_positions)
         self.embed_dropout = nn.Dropout(dropout)
         # Scale embedding theo sqrt(d_model) -- đúng thực hành Vaswani 2017
@@ -178,6 +201,7 @@ class CaptionDecoderTransformer(nn.Module):
 
         # ----- Output projection -----
         self.output_proj = nn.Linear(hidden_dim, self.vocab_size)
+        nn.init.zeros_(self.output_proj.bias)  # bias KHÔNG bị tie -- zero-init cho sạch (thực hành chuẩn khi tie weight)
         if tie_weights:
             # Weight tying (Press & Wolf, 2017) -- dùng CHUNG ma trận trọng số
             # giữa token embedding và output projection.
@@ -211,9 +235,19 @@ class CaptionDecoderTransformer(nn.Module):
         tgt_embeddings = self.embed_dropout(self._embed_tokens(caption_ids))  # (B, T, hidden_dim)
 
         seq_len = caption_ids.size(1)
-        # Causal mask (tam giác trên = -inf) -- đảm bảo token vị trí t chỉ nhìn
-        # được token 0..t-1, đúng ràng buộc autoregressive.
-        causal_mask = nn.Transformer.generate_square_subsequent_mask(seq_len).to(self.device)
+        # Causal mask (tam giác trên = True -- vị trí BỊ CHE) -- đảm bảo token
+        # vị trí t chỉ nhìn được token 0..t-1, đúng ràng buộc autoregressive.
+        #
+        # FIX (phát hiện qua smoke test -- UserWarning "mismatched key_padding_mask
+        # and attn_mask"): nn.Transformer.generate_square_subsequent_mask() trả
+        # về mask dạng FLOAT (0.0 / -inf), trong khi tgt_key_padding_mask /
+        # memory_key_padding_mask bên dưới là BOOL -- PyTorch cảnh báo 2 loại
+        # mask khác dtype sẽ ngừng được hỗ trợ ở bản sau. Tự dựng causal mask
+        # dạng BOOL (torch.triu) để đồng nhất dtype với padding mask, tránh
+        # cảnh báo và tránh lỗi tiềm ẩn khi PyTorch nâng cấp.
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, dtype=torch.bool, device=self.device), diagonal=1
+        )  # True ở tam giác trên (vị trí tương lai) -- đúng convention "True = CẦN CHE"
 
         # nn.TransformerDecoder quy ước *_key_padding_mask: True = vị trí CẦN CHE
         # (padding) -- giống hệt convention đã dùng trong fusion_module.py
