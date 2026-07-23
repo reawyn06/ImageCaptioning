@@ -32,7 +32,7 @@ from tqdm import tqdm
 # ============================================================
 SCENE_GRAPH_DIR = r"C:\Users\ADMIN\Documents\NCKH\ImageCaptioning\features\semantic\train2017"
 OUTPUT_DIR = r"C:\Users\ADMIN\Documents\NCKH\ImageCaptioning\features"
-TOP_K = 1200
+TOP_K = 3500
 
 # Category quá mơ hồ, không mang giá trị phát hiện thực sự -> loại thủ công
 MANUAL_EXCLUDE = {"thing", "item", "stuff", "object"}

@@ -53,8 +53,7 @@ CONTAINMENT_OVERLAP_RATIO = 0.7          # box A coi như "bộ phận của" bo
 AREA_RATIO_THRESHOLD_FOR_PART_OF = 0.35  # A phải nhỏ hơn B ít nhất theo tỉ lệ này mới coi A là "bộ phận"
 
 BACKGROUND_CATEGORIES = {
-    "field", "pasture", "grass", "sky", "ground", "floor", "wall", "ceiling",
-    "background", "road", "street", "sidewalk", "water", "sand", "snow",
+    "field", "pasture", "grass", "sky", "ground", "floor", "wall", "ceiling", "road", "street", "sidewalk", "water", "sand",
     "mountain", "forest", "beach", "cloud",
 }
 

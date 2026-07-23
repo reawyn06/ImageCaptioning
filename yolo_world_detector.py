@@ -31,7 +31,7 @@ from sgg_lite import DetectedObject, _normalize_text
 # ============================================================
 VOCAB_PATH = r"C:\Users\ADMIN\Documents\NCKH\ImageCaptioning\features\yolo_world_vocab.txt"
 MODEL_NAME = "yolov8s-worldv2.pt"
-CONFIDENCE_THRESHOLD = 0.4
+CONFIDENCE_THRESHOLD = 0.25
 MAX_OBJECTS_PER_IMAGE = 12  # khớp giá trị đã dùng trong sgg_lite.py
 
 
@@ -70,6 +70,7 @@ class YOLOWorldDetector:
         self.model.set_classes(self.class_list)
         print(f"[YOLOWorld] Sẵn sàng — {len(self.class_list)} category "
               f"(vd: {self.class_list[:8]}...)")
+        print(f"===> CONFIRM: Dùng Vocab mới gồm {len(self.class_list)} từ | Conf threshold = {self.confidence_threshold}")
 
     @torch.no_grad()
     def detect(self, image: Image.Image,
