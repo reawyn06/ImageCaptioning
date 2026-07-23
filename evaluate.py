@@ -98,7 +98,7 @@ MAX_GEN_LENGTH = 30
 # TÁCH RIÊNG khỏi 2135 ảnh sẽ báo cáo chính thức, để tránh "overfit" tham số
 # decode lên chính tập test (xem giải thích trong hội thoại). -----
 NUM_BEAMS = 4
-LENGTH_PENALTY = 1.0
+LENGTH_PENALTY = 0.8
 
 ALL_STRATEGIES = ["baseline", "concat", "one_directional", "bidirectional"]
 
@@ -107,11 +107,14 @@ ALL_STRATEGIES = ["baseline", "concat", "one_directional", "bidirectional"]
 # BƯỚC 1 — Sinh caption cho toàn bộ val set bằng 1 checkpoint (Beam Search)
 # ============================================================
 @torch.no_grad()
-def generate_captions_for_strategy(strategy: str, device, max_images: int = None) -> dict:
+def generate_captions_for_strategy(strategy: str, device, max_images: int = None, image_offset: int = None) -> dict:
     """
     Load checkpoint best của 1 strategy, sinh caption bằng BEAM SEARCH
-    (num_beams=NUM_BEAMS -- xem FIX #3) cho toàn bộ ảnh trong val2017 (hoặc
-    max_images ảnh đầu nếu được truyền, dùng để test nhanh trước khi chạy full).
+    (num_beams=NUM_BEAMS -- xem FIX #3) cho toàn bộ ảnh trong val2017, hoặc
+    1 lát cắt [image_offset : image_offset+max_images] nếu max_images được
+    truyền -- dùng để (a) test nhanh/đo ETA trước khi chạy full, hoặc (b) lấy
+    1 tập DEV RIÊNG BIỆT (qua image_offset) để tune length_penalty/num_beams
+    mà không "nhìn trộm" đúng những ảnh sẽ dùng để báo cáo kết quả chính thức.
     Trả về dict {coco_id_str: caption_string}.
     """
     checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{strategy}_best.pt")
@@ -128,10 +131,15 @@ def generate_captions_for_strategy(strategy: str, device, max_images: int = None
     val_dataset = CaptionDataset(PROJECT_ROOT, "val2017")
 
     if max_images:
-        # Test nhanh trên 1 tập con đầu -- KHÔNG dùng số này để báo cáo chính
-        # thức, chỉ để đo ETA / sanity-check trước khi chạy full 2135 ảnh.
-        val_dataset.image_ids = val_dataset.image_ids[:max_images]
-        print(f"  -> [TEST MODE] Giới hạn còn {len(val_dataset)} ảnh.")
+        # FIX (MỚI): thêm image_offset để lấy 1 LÁT CẮT RIÊNG BIỆT (khác tập
+        # 100 ảnh đầu đã dùng để test tốc độ trước đó), tránh "nhìn trộm"
+        # tập test khi tune length_penalty/num_beams -- nếu tune trực tiếp
+        # trên đúng ảnh sẽ báo cáo, đó là học thuộc tập test, đúng loại lỗi
+        # "kết luận chủ quan" giáo viên đã phê bình.
+        start = image_offset or 0
+        end = start + max_images
+        val_dataset.image_ids = val_dataset.image_ids[start:end]
+        print(f"  -> [TEST MODE] Dùng ảnh [{start}:{end}], còn {len(val_dataset)} ảnh.")
 
     val_loader = DataLoader(
         val_dataset, batch_size=BATCH_SIZE, shuffle=False,
@@ -275,6 +283,12 @@ def main():
                         help="Giới hạn số ảnh -- dùng để test nhanh/đo ETA Beam Search "
                              "trước khi chạy full 2135 ảnh (vd --max-images 200). "
                              "KHÔNG dùng số liệu chạy giới hạn này để báo cáo chính thức.")
+    parser.add_argument("--image-offset", type=int, default=None,
+                        help="Bỏ qua N ảnh đầu trước khi lấy --max-images ảnh tiếp theo "
+                             "(vd --image-offset 300 --max-images 200 -> dùng ảnh [300:500]). "
+                             "Dùng để lấy 1 tập DEV RIÊNG BIỆT (khác 100 ảnh đầu đã test) "
+                             "khi tune length_penalty/num_beams, tránh tune trên đúng ảnh "
+                             "sẽ dùng để báo cáo chính thức (data leakage).")
     parser.add_argument("--num-beams", type=int, default=NUM_BEAMS,
                         help=f"Số beam cho Beam Search (mặc định {NUM_BEAMS}).")
     parser.add_argument("--length-penalty", type=float, default=LENGTH_PENALTY,
@@ -306,7 +320,9 @@ def main():
             continue
 
         # ----- Sinh caption (Beam Search) -----
-        generated = generate_captions_for_strategy(strategy, device, max_images=args.max_images)
+        generated = generate_captions_for_strategy(
+            strategy, device, max_images=args.max_images, image_offset=args.image_offset
+        )
 
         # Lưu caption sinh ra ra file riêng (để xem qua, debug, hoặc đưa vào báo cáo)
         tag = "_testrun" if args.max_images else ""
